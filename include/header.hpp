@@ -20,6 +20,11 @@
 #include <boost/core/null_deleter.hpp>
 #include <boost/log/expressions/keyword.hpp>
 
+#define PORTNMB 8001
+#define TIMEOUT 5000
+const char filename[] = "/home/proof/Desktop/info7.log";
+const char filename_2[] = "/home/proof/Desktop/sample.log";
+
 namespace keywords = boost::log::keywords;
 namespace logging = boost::log;
 
@@ -33,171 +38,171 @@ class Client;
 std::vector<std::shared_ptr<Client>> clients;
 
 class Client{
-private:
-    ip::tcp::socket sock;
-    enum { max_msg = 1024 };
-    int already_read_;
-    char buff_[max_msg];
-    bool started_;
-    std::string username_;
-    bool clients_changed_;
-    boost::posix_time::ptime last_ping;
-public:
-    Client() : sock(service),clients_changed_(false) {}
+ private:
+  ip::tcp::socket sock;
+  enum { max_msg = 1024 };
+  int already_read_;
+  char buff_[max_msg];
+  bool started_;
+  std::string username_;
+  bool clients_changed_;
+  boost::posix_time::ptime last_ping;
+ public:
+  Client() : sock(service),clients_changed_(false) {}
 
-    ip::tcp::socket& sock_r(){
-        return sock;
+  ip::tcp::socket& sock_r(){
+    return sock;
+  }
+
+  std::string username() const {
+    return username_;
+  }
+
+  void answer_to_client(){
+    try {
+      read_request();
+      process_request();
     }
-
-    std::string username() const {
-        return username_;
+    catch ( boost::system::system_error&)
+    {
+      stop();
     }
+    if ( timed_out())
+      stop();
+  }
 
-    void answer_to_client(){
-        try {
-            read_request();
-            process_request();
-        }
-        catch ( boost::system::system_error&)
-        {
-            stop();
-        }
-        if ( timed_out())
-            stop();
+  void read_request() {
+    if (sock.available())
+      already_read_ += sock.read_some(buffer(buff_ + already_read_, max_msg - already_read_));
+  }
+
+  void process_request() {
+    bool found_enter = std::find(buff_, buff_ + already_read_, '\n') < buff_ + already_read_;
+    if (!found_enter)
+      return;
+
+    last_ping = boost::posix_time::microsec_clock::local_time();
+    size_t pos = std::find(buff_, buff_ + already_read_, '\n') - buff_;
+    std::string msg(buff_, pos);
+    std::copy(buff_ + already_read_, buff_ + max_msg, buff_);
+    already_read_ -= pos + 1;
+
+
+    if (msg.find("login ") == 0) on_login(msg);
+    else if (msg.find("ping") == 0) on_ping();
+    else if (msg.find("ask_clients") == 0) on_clients();
+    else std::cerr << "invalid msg " << msg << std::endl;
+  }
+
+  void on_login(const std::string & msg){
+    std::istringstream in(msg);
+    in >> username_ >> username_;
+    //std::cout<< username_ <<std::endl;
+    write("login ok\n");
+    {
+      boost::recursive_mutex::scoped_lock lk(mx);
+      for(unsigned i=0;i<clients.size()-1;i++) {
+        clients[i]->update_clients_changed();
+      }
     }
+  }
 
-    void read_request() {
-        if (sock.available())
-            already_read_ += sock.read_some(buffer(buff_ + already_read_, max_msg - already_read_));
+  void update_clients_changed(){
+    clients_changed_ = true;
+  }
+
+  void on_ping(){
+    //std::cout<<clients_changed_<<std::endl;
+    write(clients_changed_ ? "ping client_list_changed\n" : "ping ok\n");
+    clients_changed_ = false;
+  }
+
+  void on_clients(){
+    std::string msg;
+    {
+      boost::recursive_mutex::scoped_lock lk(mx);
+      for(auto b = clients.begin(), e = clients.end() ;b != e; ++b)
+        msg += (*b)->username() + " ";
     }
+    write("clients " + msg + "\n");
+  }
 
-    void process_request() {
-        bool found_enter = std::find(buff_, buff_ + already_read_, '\n') < buff_ + already_read_;
-        if (!found_enter)
-            return;
+  void write(const std::string & msg) {
+    //cout<<msg<<endl;
+    sock.write_some(buffer(msg));
+  }
 
-        last_ping = boost::posix_time::microsec_clock::local_time();
-        size_t pos = std::find(buff_, buff_ + already_read_, '\n') - buff_;
-        std::string msg(buff_, pos);
-        std::copy(buff_ + already_read_, buff_ + max_msg, buff_);
-        already_read_ -= pos + 1;
+  void stop() {
+    boost::system::error_code err;
+    sock.close(err);
+  }
 
-
-        if (msg.find("login ") == 0) on_login(msg);
-        else if (msg.find("ping") == 0) on_ping();
-        else if (msg.find("ask_clients") == 0) on_clients();
-        else std::cerr << "invalid msg " << msg << std::endl;
-    }
-
-    void on_login(const std::string & msg){
-        std::istringstream in(msg);
-        in >> username_ >> username_;
-        //std::cout<< username_ <<std::endl;
-        write("login ok\n");
-        {
-            boost::recursive_mutex::scoped_lock lk(mx);
-            for(unsigned i=0;i<clients.size()-1;i++) {
-                clients[i]->update_clients_changed();
-            }
-        }
-    }
-
-    void update_clients_changed(){
-        clients_changed_ = true;
-    }
-
-    void on_ping(){
-        //std::cout<<clients_changed_<<std::endl;
-        write(clients_changed_ ? "ping client_list_changed\n" : "ping ok\n");
-        clients_changed_ = false;
-    }
-
-    void on_clients(){
-        std::string msg;
-        {
-            boost::recursive_mutex::scoped_lock lk(mx);
-            for(auto b = clients.begin(), e = clients.end() ;b != e; ++b)
-                msg += (*b)->username() + " ";
-        }
-        write("clients " + msg + "\n");
-    }
-
-    void write(const std::string & msg) {
-        //cout<<msg<<endl;
-        sock.write_some(buffer(msg));
-    }
-
-    void stop() {
-        boost::system::error_code err;
-        sock.close(err);
-    }
-
-    bool timed_out() const {
-        boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
-        long long ms = (now - last_ping).total_milliseconds();
-        return ms > 5000 ;
-    }
+  bool timed_out() const {
+    boost::posix_time::ptime now = boost::posix_time::microsec_clock::local_time();
+    long long ms = (now - last_ping).total_milliseconds();
+    return ms > TIMEOUT ;
+  }
 };
 
 static void log_init() {
-    logging::add_file_log (
-            keywords::file_name = "info.log",
-            keywords::format = "[%TimeStamp%] [%ThreadID%] [%Severity%] %Message%"
-    );
+  logging::add_file_log (
+      keywords::file_name = filename,
+      keywords::format = "[%TimeStamp%] [%ThreadID%] [%Severity%] %Message%"
+  );
 
-    logging::add_console_log (
-            std::cout,
-            keywords::format = "[%TimeStamp%] [%ThreadID%] [%Severity%] %Message%"
-    );
+  logging::add_console_log (
+      std::cout,
+      keywords::format = "[%TimeStamp%] [%ThreadID%] [%Severity%] %Message%"
+  );
 
-    logging::add_common_attributes();
+  logging::add_common_attributes();
 }
 
 void init()
 {
-    logging::add_file_log("sample.log");
+  logging::add_file_log(filename_2);
 
-    logging::core::get()->set_filter
-            (
-                    logging::trivial::severity >= logging::trivial::info
-            );
+  logging::core::get()->set_filter
+      (
+          logging::trivial::severity >= logging::trivial::info
+      );
 }
 
 void accept_thread(){
-    ip::tcp::acceptor acceptor(service, ip::tcp::endpoint(ip::tcp::v4(), 8001));
-    log_init();
-    while(true){
-        std::shared_ptr<Client> cl = std::make_shared<Client>();
-        std::cout<<"wait client"<<std::endl;
-        acceptor.accept(cl->sock_r());
-        std::cout<<"client acepted"<<std::endl;
+  ip::tcp::acceptor acceptor(service, ip::tcp::endpoint(ip::tcp::v4(), PORTNMB));
+  log_init();
+  while(true){
+    std::shared_ptr<Client> cl = std::make_shared<Client>();
+    std::cout<<"wait client"<<std::endl;
+    acceptor.accept(cl->sock_r());
+    std::cout<<"client acepted"<<std::endl;
 
-        BOOST_LOG_TRIVIAL(info) << "client acepted";
+    BOOST_LOG_TRIVIAL(info) << "client acepted";
 //        BOOST_LOG_SEV(trace, lg) << "client acepted";
-        boost::recursive_mutex::scoped_lock lock(mx);
-        clients.push_back(cl);
-    }
+    boost::recursive_mutex::scoped_lock lock(mx);
+    clients.push_back(cl);
+  }
 }
 
 void handle_clients_thread(){
-    while (true) {
-        boost::this_thread::sleep(boost::posix_time::millisec(1));
-        boost::recursive_mutex::scoped_lock lk(mx);
-        for(auto b = clients.begin(); b != clients.end(); ++b)
-            (*b)->answer_to_client();
+  while (true) {
+    boost::this_thread::sleep(boost::posix_time::millisec(1));
+    boost::recursive_mutex::scoped_lock lk(mx);
+    for(auto b = clients.begin(); b != clients.end(); ++b)
+      (*b)->answer_to_client();
 
-        clients.erase(std::remove_if(clients.begin(), clients.end(),
-                                     boost::bind(&Client::timed_out,_1)), clients.end());
-    }
+    clients.erase(std::remove_if(clients.begin(), clients.end(),
+                                 boost::bind(&Client::timed_out,_1)), clients.end());
+  }
 }
 
 
 
 int main(){
-    boost::thread_group threads;
-    threads.create_thread(accept_thread);
-    threads.create_thread(handle_clients_thread);
-    threads.join_all();
+  boost::thread_group threads;
+  threads.create_thread(accept_thread);
+  threads.create_thread(handle_clients_thread);
+  threads.join_all();
 
-    return 0;
+  return 0;
 }
